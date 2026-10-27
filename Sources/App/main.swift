@@ -367,7 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if documents.isEmpty { newStartWindow() }
             guard let d = documents.last else { return }
             d.snapshotPath = snapshot
-            d.window.setFrame(NSRect(x: 40, y: 40, width: 1000, height: 2300), display: true)
+            let size = (ProcessInfo.processInfo.environment["MDVIEW_SNAPSHOT_SIZE"] ?? "1000x2300").split(separator: "x").compactMap { Double($0) }
+            let w = size.count == 2 ? size[0] : 1000, h = size.count == 2 ? size[1] : 2300
+            d.window.setFrame(NSRect(x: 40, y: 40, width: w, height: h), display: true)
         }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, e.charactersIgnoringModifiers == "=" {
