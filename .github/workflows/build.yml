@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app and Quick Look extension
+        run: ./build.sh
+      - name: Render the sample document
+        run: |
+          MDVIEW_SNAPSHOT_DELAY=5 build/MDView.app/Contents/MacOS/MDView --snapshot out.pdf samples/Sample.md
+          MDVIEW_SNAPSHOT_DELAY=5 build/MDView.app/Contents/MacOS/MDView --snapshot out.html samples/Sample.md
+          test "$(stat -f%z out.pdf)" -gt 20000
+          grep -q 'class="footnotes"' out.html && grep -q 'katex' out.html
+      - name: Large document timing
+        run: |
+          python3 tests/make_large.py large.md 400
+          MDVIEW_SNAPSHOT_DELAY=20 build/MDView.app/Contents/MacOS/MDView --snapshot large.html large.md | tee timing.txt
+          grep -q 'html written' timing.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MDView-macOS
+          path: build/MDView.app
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK and WebKitGTK bindings
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1 xvfb shellcheck
+      - name: Static checks
+        run: |
+          python3 -m py_compile linux/mdview.py
+          node --check Resources/app.js
+          sh -n install.sh
+          shellcheck -S warning install.sh
+      - name: Render the sample document
+        run: |
+          MDVIEW_SNAPSHOT_DELAY=5 xvfb-run -a -s "-screen 0 1200x2400x24" python3 linux/mdview.py --snapshot out.png samples/Sample.md
+          MDVIEW_SNAPSHOT_DELAY=5 xvfb-run -a -s "-screen 0 1200x2400x24" python3 linux/mdview.py --snapshot out.html samples/Sample.md
+          test "$(stat -c%s out.png)" -gt 20000
+          grep -q 'class="footnotes"' out.html && grep -q 'katex' out.html
+      - name: Large document timing
+        run: |
+          python3 tests/make_large.py large.md 400
+          MDVIEW_SNAPSHOT_DELAY=20 xvfb-run -a -s "-screen 0 1200x2400x24" python3 linux/mdview.py --snapshot large.html large.md | tee timing.txt
+          grep -q 'html written' timing.txt
+      - name: Installer dry run
+        run: sh install.sh --no-default && test -x "$HOME/.local/bin/mdview" && test -f "$HOME/.local/share/applications/mdview.desktop"

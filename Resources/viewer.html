@@ -2,29 +2,30 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file: data: http: https:; media-src file: data:; style-src 'unsafe-inline'; script-src 'nonce-@@NONCE@@'; connect-src 'none'; frame-src 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src mdview: data: http: https:; media-src mdview: data:; font-src mdview:; style-src 'unsafe-inline' mdview:; script-src 'nonce-@@NONCE@@' mdview:; connect-src 'none'; frame-src 'none'; form-action 'none'">
 <meta name="color-scheme" content="light dark">
 <base href="@@BASE@@">
 <title>@@TITLE@@</title>
+<link rel="stylesheet" href="mdview://app/vendor/katex/katex.min.css">
 <style>
 :root {
   color-scheme: light dark;
   --bg:#ffffff; --fg:#1d1d1f; --muted:#6e6e73; --border:#e2e2e7; --code-bg:#f5f5f7;
-  --accent:#0b6bcb; --quote:#d0d0d5; --mark:#fff2a8; --hit:#ffd54a; --hit-cur:#ff9f0a;
+  --accent:#0b6bcb; --quote:#d0d0d5; --mark:#fff2a8; --hit:#ffd54a; --hit-cur:#ff9f0a; --chip:#e8f0fb;
   --h-kw:#a626a4; --h-str:#50a14f; --h-num:#986801; --h-fn:#4078f2; --h-type:#c18401; --h-del:#e45649;
   --toc-w:260px; --max:820px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg:#1c1c1e; --fg:#e8e8ea; --muted:#9a9aa0; --border:#3a3a3e; --code-bg:#2a2a2e;
-    --accent:#5aa2ff; --quote:#4a4a4e; --mark:#6b5a00; --hit:#b38600; --hit-cur:#ff9f0a;
+    --accent:#5aa2ff; --quote:#4a4a4e; --mark:#6b5a00; --hit:#b38600; --hit-cur:#ff9f0a; --chip:#27354a;
     --h-kw:#c678dd; --h-str:#98c379; --h-num:#d19a66; --h-fn:#61afef; --h-type:#e5c07b; --h-del:#e06c75;
   }
 }
 * { box-sizing: border-box; }
 html { background: var(--bg); }
 body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 16px/1.65 -apple-system, system-ui, "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased; }
+  font: 16px/1.65 -apple-system, system-ui, "Helvetica Neue", "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
 main { max-width: var(--max); margin: 0 auto; padding: 36px 44px 96px; overflow-wrap: break-word; }
 body.toc-open main { margin-left: var(--toc-w); }
 h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.6em 0 .6em; font-weight: 650; position: relative; }
@@ -42,7 +43,7 @@ a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: un
 a.wikilink { border-bottom: 1px dotted var(--accent); } .embed { color: var(--muted); }
 strong { font-weight: 650; } hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
 img { max-width: 100%; height: auto; } img[align=right] { margin-left: 1em; } img[align=left] { margin-right: 1em; }
-code, kbd, samp { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .88em; }
+code, kbd, samp { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: .88em; }
 code { background: var(--code-bg); padding: .12em .35em; border-radius: 4px; }
 kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 .35em; background: var(--code-bg); }
 .codeblock { position: relative; margin: 0 0 1em; }
@@ -59,6 +60,10 @@ th, td { border: 1px solid var(--border); padding: 6px 13px; text-align: left; v
 th { background: var(--code-bg); font-weight: 600; } tr:nth-child(even) td { background: color-mix(in srgb, var(--code-bg) 50%, transparent); }
 mark { background: var(--mark); color: inherit; padding: 0 .15em; border-radius: 3px; }
 mark.hit { background: var(--hit); color: #000; padding: 0; } mark.hit.current { background: var(--hit-cur); }
+.doc-head { margin-bottom: 1.2em; }
+.doc-head h1.fm-title { margin-bottom: .3em; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 .8em; }
+.chip { font-size: 12px; line-height: 1; padding: 5px 9px; border-radius: 999px; background: var(--chip); color: var(--accent); }
 details.frontmatter { font-size: 13px; margin-bottom: 1.6em; color: var(--muted); }
 details.frontmatter summary { cursor: pointer; user-select: none; }
 details.frontmatter pre { margin: .5em 0 0; background: var(--code-bg); border-radius: 8px; padding: 10px 14px; overflow: auto; }
@@ -74,14 +79,23 @@ details.frontmatter code { background: none; padding: 0; font-size: 12px; }
 .callout-question, .callout-help, .callout-faq { --c: #c9a200; }
 .callout-abstract, .callout-summary, .callout-tldr { --c: #0e9aa7; }
 .callout-quote, .callout-cite { --c: var(--muted); }
+sup.fn-ref { font-size: .75em; line-height: 0; } sup.fn-ref a { padding: 0 .15em; }
+section.footnotes { margin-top: 2.5em; font-size: .9em; color: var(--muted); }
+section.footnotes ol { padding-left: 1.6em; } section.footnotes li:target { color: var(--fg); }
+section.footnotes a.fn-back { margin-left: .3em; text-decoration: none; }
+.mermaid { margin: 0 0 1em; text-align: center; overflow: auto; } .mermaid svg { max-width: 100%; height: auto; }
+.mermaid.error pre { text-align: left; color: var(--h-del); white-space: pre-wrap; }
+.katex-display { overflow: auto hidden; padding: .2em 0; } .katex { font-size: 1.05em; }
+.math-error { color: var(--h-del); }
 #toc { display: none; position: fixed; left: 0; top: 0; bottom: 0; width: var(--toc-w); overflow: auto; padding: 18px 14px 40px 18px;
   border-right: 1px solid var(--border); background: var(--bg); font-size: 13px; line-height: 1.4; }
 body.toc-open #toc { display: block; }
 #toc h6 { margin: 0 0 .7em; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-#toc ul { list-style: none; margin: 0; padding: 0; } #toc li { margin: 0; padding: 3px 0; }
+#toc ul { list-style: none; margin: 0; padding: 0; } #toc li { margin: 0; padding: 3px 0 3px 6px; border-left: 2px solid transparent; }
+#toc li.active { border-left-color: var(--accent); } #toc li.active a { color: var(--accent); }
 #toc li a { color: var(--fg); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #toc li a:hover { color: var(--accent); text-decoration: none; }
-#toc .toc-h1 { font-weight: 600; } #toc .toc-h2 { padding-left: 12px; } #toc .toc-h3 { padding-left: 24px; color: var(--muted); } #toc .toc-h4 { padding-left: 36px; color: var(--muted); }
+#toc .toc-h1 { font-weight: 600; } #toc .toc-h2 { padding-left: 16px; } #toc .toc-h3 { padding-left: 28px; color: var(--muted); } #toc .toc-h4 { padding-left: 40px; color: var(--muted); }
 #toc .toc-empty { color: var(--muted); }
 #findbar { position: fixed; top: 10px; right: 14px; z-index: 10; display: flex; gap: 4px; align-items: center;
   background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 6px 8px; box-shadow: 0 6px 22px rgba(0,0,0,.18); }
@@ -92,6 +106,17 @@ body.toc-open #toc { display: block; }
 #findbar button { font: 13px system-ui; color: var(--fg); background: none; border: 1px solid transparent; border-radius: 5px; width: 24px; height: 24px; cursor: pointer; }
 #findbar button:hover { background: var(--code-bg); }
 #find-count { font: 12px system-ui; color: var(--muted); min-width: 64px; text-align: right; padding: 0 4px; }
+/* start page (no document open) */
+#start { display: none; max-width: 560px; margin: 12vh auto 0; padding: 0 32px; text-align: center; }
+body.start #start { display: block; } body.start main, body.start #toc { display: none; }
+#start h1 { font-size: 1.6em; margin: 0 0 .2em; } #start p { color: var(--muted); margin: 0 0 1.4em; }
+#start .drop { border: 2px dashed var(--border); border-radius: 14px; padding: 36px 20px; color: var(--muted); margin-bottom: 1.6em; }
+#start button { font: 14px system-ui; padding: 9px 18px; border-radius: 8px; border: 1px solid var(--border); background: var(--code-bg); color: var(--fg); cursor: pointer; }
+#start button:hover { border-color: var(--accent); color: var(--accent); }
+#start ul { list-style: none; padding: 0; margin: 0; text-align: left; }
+#start li a { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 8px; color: var(--fg); }
+#start li a:hover { background: var(--code-bg); text-decoration: none; } #start li a span { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#start h6 { margin: 0 0 .5em; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); text-align: left; }
 .hljs { color: var(--fg); }
 .hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-meta .hljs-keyword, .hljs-operator { color: var(--h-kw); }
@@ -102,22 +127,28 @@ body.toc-open #toc { display: block; }
 .hljs-deletion { color: var(--h-del); } .hljs-emphasis { font-style: italic; } .hljs-strong { font-weight: bold; }
 @media print { #toc, #findbar, .copy, a.anchor { display: none !important; } body.toc-open main { margin-left: 0; } main { max-width: none; padding: 0; } .codeblock pre { white-space: pre-wrap; } }
 </style>
-<script nonce="@@NONCE@@">@@MARKED@@</script>
-<script nonce="@@NONCE@@">@@HLJS@@</script>
+<script src="mdview://app/vendor/marked.umd.js"></script>
+<script src="mdview://app/vendor/highlight.min.js"></script>
+<script src="mdview://app/vendor/katex/katex.min.js"></script>
 </head>
 <body class="@@BODYCLASS@@">
 <div id="findbar" hidden>
   <input id="find-input" type="text" placeholder="Find" spellcheck="false" autocomplete="off">
   <span id="find-count"></span>
-  <button id="find-prev" title="Previous (⇧↩)">‹</button>
-  <button id="find-next" title="Next (↩)">›</button>
+  <button id="find-prev" title="Previous (shift+enter)">‹</button>
+  <button id="find-next" title="Next (enter)">›</button>
   <button id="find-close" title="Close (esc)">×</button>
 </div>
 <nav id="toc"><h6>Outline</h6></nav>
+<section id="start">
+  <h1>MDView</h1>
+  <p>A lightweight Markdown viewer.</p>
+  <div class="drop">Drop a Markdown file here</div>
+  <button id="start-open" type="button">Open a file…</button>
+  <div id="start-recent"></div>
+</section>
 <main id="content"></main>
-<script nonce="@@NONCE@@">
-@@APP@@
-</script>
-<script nonce="@@NONCE@@">MDV.boot(@@MD@@, @@SCROLL@@);</script>
+<script src="mdview://app/app.js"></script>
+<script nonce="@@NONCE@@">MDV.boot(@@MD@@, @@SCROLL@@, @@EXTRA@@);</script>
 </body>
 </html>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=MDView
+GenericName=Markdown Viewer
+Comment=A lightweight Markdown viewer
+Exec=python3 @LIB@/linux/mdview.py %F
+Icon=mdview
+Terminal=false
+Categories=Office;Viewer;Utility;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=true
+StartupWMClass=mdview

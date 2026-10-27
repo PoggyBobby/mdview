@@ -2,11 +2,9 @@ import AppKit
 import WebKit
 import UniformTypeIdentifiers
 
-// MARK: - Constants / preferences
-
 let appName = "MDView"
-let markdownType = UTType("net.daringfireball.markdown") ?? .plainText
-let mdExtensions: Set<String> = ["md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt", "mdtext"]
+
+// MARK: - Preferences
 
 enum Prefs {
     static let d = UserDefaults.standard
@@ -38,44 +36,6 @@ enum Prefs {
     }
 }
 
-func escapeHTML(_ s: String) -> String {
-    s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
-     .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
-}
-
-// MARK: - HTML template
-
-enum Template {
-    static let shell: String = {
-        let res = Bundle.main.resourceURL ?? URL(fileURLWithPath: ".")
-        func read(_ name: String) -> String {
-            (try? String(contentsOf: res.appendingPathComponent(name), encoding: .utf8)) ?? ""
-        }
-        return read("viewer.html")
-            .replacingOccurrences(of: "@@MARKED@@", with: read("vendor/marked.umd.js"))
-            .replacingOccurrences(of: "@@HLJS@@", with: read("vendor/highlight.min.js"))
-            .replacingOccurrences(of: "@@APP@@", with: read("app.js"))
-    }()
-
-    /// JSON string literal safe to embed inside a <script> block (JSONSerialization escapes "/" so "</script>" cannot occur).
-    static func jsString(_ s: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [s]) else { return "\"\"" }
-        var json = String(decoding: data, as: UTF8.self)
-        json.removeFirst(); json.removeLast()
-        return json.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
-    }
-
-    static func html(markdown: String, fileURL: URL, scrollY: Int, tocOpen: Bool) -> String {
-        shell
-            .replacingOccurrences(of: "@@NONCE@@", with: UUID().uuidString)
-            .replacingOccurrences(of: "@@BASE@@", with: escapeHTML(fileURL.deletingLastPathComponent().absoluteString))
-            .replacingOccurrences(of: "@@TITLE@@", with: escapeHTML(fileURL.lastPathComponent))
-            .replacingOccurrences(of: "@@BODYCLASS@@", with: tocOpen ? "toc-open" : "")
-            .replacingOccurrences(of: "@@SCROLL@@", with: String(scrollY))
-            .replacingOccurrences(of: "@@MD@@", with: jsString(markdown))
-    }
-}
-
 // MARK: - Script message proxy (avoids the WKUserContentController retain cycle)
 
 final class MessageProxy: NSObject, WKScriptMessageHandler {
@@ -86,33 +46,44 @@ final class MessageProxy: NSObject, WKScriptMessageHandler {
     }
 }
 
-// MARK: - Document window
+// MARK: - Document window (url == nil shows the start page)
 
-final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    let url: URL
+final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, NSMenuItemValidation {
+    let url: URL?
+    let root: URL?
     let window: NSWindow
     let webView: WKWebView
     private var watcher: DispatchSourceFileSystemObject?
     private var refreshTimer: Timer?
-    private var tempFile: URL?
     private var lastContent = ""
     private var pendingAnchor: String?
     private var pageLoaded = false
-    static let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("MDView", isDirectory: true)
-    var snapshotPath: String?          // debug: --snapshot <png|pdf>
     private var exporting = false
+    var snapshotPath: String?          // debug: --snapshot <png|pdf|html>
+    private(set) var lastRenderMs = -1
 
-    init(url: URL, anchor: String? = nil) {
+    var isStart: Bool { url == nil }
+    var pageURL: URL { url.map(Template.baseURL) ?? Template.startBase }
+
+    init(url: URL?, anchor: String? = nil) {
         self.url = url
+        self.root = url.map(Roots.root)
         self.pendingAnchor = anchor
         let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(SchemeHandler.shared, forURLScheme: schemeName)
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 760), configuration: config)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         super.init()
 
+        if let root { Roots.allow(root) }
         config.userContentController.add(MessageProxy(self), name: "mdv")
+        let errorHook = """
+        window.addEventListener('error', e => { try { webkit.messageHandlers.mdv.postMessage({type:'error', message: String(e.message) + ' @ ' + (e.filename||'') + ':' + e.lineno}); } catch (_) {} });
+        window.addEventListener('unhandledrejection', e => { try { webkit.messageHandlers.mdv.postMessage({type:'error', message: 'unhandled: ' + String(e.reason && e.reason.message || e.reason)}); } catch (_) {} });
+        """
+        config.userContentController.addUserScript(WKUserScript(source: errorHook, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         if #available(macOS 13.3, *) { webView.isInspectable = true }
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -122,7 +93,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
         webView.underPageBackgroundColor = .windowBackgroundColor
         webView.autoresizingMask = [.width, .height]
 
-        window.title = url.lastPathComponent
+        window.title = url?.lastPathComponent ?? appName
         window.representedURL = url
         window.contentView = webView
         window.delegate = self
@@ -132,7 +103,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
         window.setFrameAutosaveName("MDViewWindow")
         applyAppearance()
         load()
-        startWatching()
+        if url != nil { startWatching() }
     }
 
     deinit { refreshTimer?.invalidate() }
@@ -140,6 +111,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
     // MARK: Loading / refreshing
 
     private func readMarkdown() -> String? {
+        guard let url else { return nil }
         if let s = try? String(contentsOf: url, encoding: .utf8) { return s }
         var enc = String.Encoding.utf8
         if let s = try? String(contentsOf: url, usedEncoding: &enc) { return s }
@@ -148,16 +120,14 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
     }
 
     func load() {
-        let md = readMarkdown() ?? "> **MDView:** could not read `\(url.path)`."
-        lastContent = md
-        let html = Template.html(markdown: md, fileURL: url, scrollY: Prefs.scroll(for: url), tocOpen: Prefs.tocOpen)
-        if let old = tempFile { try? FileManager.default.removeItem(at: old) }
-        try? FileManager.default.createDirectory(at: Document.tempDirectory, withIntermediateDirectories: true)
-        let tmp = Document.tempDirectory.appendingPathComponent(UUID().uuidString + ".html")
-        do { try html.write(to: tmp, atomically: true, encoding: .utf8) } catch { NSSound.beep(); return }
-        tempFile = tmp
         pageLoaded = false
-        webView.loadFileURL(tmp, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+        if let url {
+            let md = readMarkdown() ?? "> **MDView:** could not read `\(url.path)`."
+            lastContent = md
+            webView.loadHTMLString(Template.html(markdown: md, fileURL: url, scrollY: Prefs.scroll(for: url), tocOpen: Prefs.tocOpen), baseURL: pageURL)
+        } else {
+            webView.loadHTMLString(Template.html(markdown: nil, fileURL: nil, scrollY: 0, tocOpen: false, recents: AppDelegate.shared.recentEntries()), baseURL: pageURL)
+        }
     }
 
     private func scheduleRefresh() {
@@ -166,6 +136,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
     }
 
     func refresh(force: Bool = false) {
+        guard let url else { if force { load() }; return }
         guard let md = readMarkdown() else { window.title = url.lastPathComponent + " (missing)"; return }
         window.title = url.lastPathComponent
         guard force || md != lastContent else { return }
@@ -183,6 +154,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
 
     private func startWatching() {
         stopWatching()
+        guard let url else { return }
         let fd = open(url.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename, .attrib, .revoke], queue: .main)
@@ -206,7 +178,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
 
     private func stopWatching() { watcher?.cancel(); watcher = nil }
 
-    // MARK: Appearance / zoom
+    // MARK: Appearance
 
     func applyAppearance() {
         switch Prefs.appearance {
@@ -219,16 +191,18 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
     // MARK: Menu actions (reached through the responder chain as window delegate)
 
     @objc func reloadDocument(_ sender: Any?) { refresh(force: true) }
-    @objc func revealInFinder(_ sender: Any?) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-    @objc func editInEditor(_ sender: Any?) { AppDelegate.shared.edit(url) }
+    @objc func revealInFinder(_ sender: Any?) { if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
+    @objc func editInEditor(_ sender: Any?) { if let url { AppDelegate.shared.edit(url) } }
     @objc func toggleOutline(_ sender: Any?) { webView.evaluateJavaScript("MDV.toggleTOC()") }
     @objc func findInPage(_ sender: Any?) { webView.evaluateJavaScript("MDV.find()") }
     @objc func findNext(_ sender: Any?) { webView.evaluateJavaScript("MDV.findNext()") }
     @objc func findPrevious(_ sender: Any?) { webView.evaluateJavaScript("MDV.findPrev()") }
     @objc func copyPath(_ sender: Any?) {
+        guard let url else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.path, forType: .string)
     }
     @objc func exportPDF(_ sender: Any?) {
+        guard let url else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + ".pdf"
@@ -238,11 +212,31 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
             self.writePDF(to: out) { ok in if !ok { NSSound.beep() } }
         }
     }
+    @objc func exportHTML(_ sender: Any?) {
+        guard let url else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + ".html"
+        panel.directoryURL = url.deletingLastPathComponent()
+        panel.beginSheetModal(for: window) { [weak self] r in
+            guard r == .OK, let out = panel.url, let self else { return }
+            self.writeHTML(to: out) { ok in if !ok { NSSound.beep() } }
+        }
+    }
     func writePDF(to out: URL, completion: @escaping (Bool) -> Void) {
         exporting = true
         webView.createPDF(configuration: WKPDFConfiguration()) { [weak self] result in
             self?.exporting = false
             if case .success(let data) = result, (try? data.write(to: out)) != nil { completion(true) } else { completion(false) }
+        }
+    }
+    func writeHTML(to out: URL, completion: @escaping (Bool) -> Void) {
+        guard let url else { completion(false); return }
+        webView.evaluateJavaScript("MDV.exportData()") { result, _ in
+            guard let d = result as? [String: Any], let body = d["html"] as? String else { completion(false); return }
+            let html = HTMLExport.standalone(title: (d["title"] as? String) ?? url.lastPathComponent, body: body,
+                                             math: d["math"] as? Bool ?? false, fileURL: url)
+            completion((try? html.write(to: out, atomically: true, encoding: .utf8)) != nil)
         }
     }
     @objc func printDocument(_ sender: Any?) {
@@ -259,47 +253,13 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
         op.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
-    // MARK: Wikilinks
-
-    private func resolveWikilink(_ name: String) -> URL? {
-        let fm = FileManager.default
-        let target = name.trimmingCharacters(in: .whitespaces)
-        guard !target.isEmpty else { return nil }
-        let hasExt = !(target as NSString).pathExtension.isEmpty
-        let candidates = hasExt ? [target] : [target + ".md", target]
-        let dir = url.deletingLastPathComponent()
-        for c in candidates {
-            let u = dir.appendingPathComponent(c)
-            var isDir: ObjCBool = false
-            if fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue { return u }
-        }
-        // Vault-wide lookup: nearest ancestor containing ".obsidian", else the file's own folder.
-        var root = dir
-        var probe = dir
-        for _ in 0..<10 {
-            if fm.fileExists(atPath: probe.appendingPathComponent(".obsidian").path) { root = probe; break }
-            let parent = probe.deletingLastPathComponent()
-            if parent.path == probe.path { break }
-            probe = parent
-        }
-        let wanted = candidates.map { $0.lowercased() }
-        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
-                                     options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
-        var seen = 0
-        for case let f as URL in en {
-            seen += 1; if seen > 60_000 { break }
-            let p = f.path.lowercased()
-            for w in wanted where p.hasSuffix("/" + w) {
-                if (try? f.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true { return f }
-            }
-        }
-        return nil
-    }
-
-    private func openWikilink(_ target: String, anchor: String) {
-        guard let u = resolveWikilink(target) else { NSSound.beep(); return }
-        if mdExtensions.contains(u.pathExtension.lowercased()) { AppDelegate.shared.open(u, anchor: anchor.isEmpty ? nil : anchor) }
-        else { NSWorkspace.shared.open(u) }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard isStart, let action = item.action else { return true }
+        let documentOnly: [Selector] = [#selector(reloadDocument(_:)), #selector(revealInFinder(_:)), #selector(editInEditor(_:)),
+                                        #selector(toggleOutline(_:)), #selector(findInPage(_:)), #selector(findNext(_:)),
+                                        #selector(findPrevious(_:)), #selector(copyPath(_:)), #selector(exportPDF(_:)),
+                                        #selector(exportHTML(_:)), #selector(printDocument(_:))]
+        return !documentOnly.contains(action)
     }
 
     // MARK: WKScriptMessageHandler
@@ -307,47 +267,65 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard let body = m.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
-        case "scroll":   if !exporting, let y = body["y"] as? Int { Prefs.setScroll(y, for: url) }
-        case "toc":      Prefs.tocOpen = body["open"] as? Bool ?? false
-        case "wikilink": if let t = body["target"] as? String { openWikilink(t, anchor: body["anchor"] as? String ?? "") }
-        case "copy":     if let t = body["text"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }
-        case "edit":     AppDelegate.shared.edit(url)
+        case "scroll":    if !exporting, let url, let y = body["y"] as? Int { Prefs.setScroll(y, for: url) }
+        case "toc":       Prefs.tocOpen = body["open"] as? Bool ?? false
+        case "wikilink":  if let t = body["target"] as? String { openWikilink(t, anchor: body["anchor"] as? String ?? "") }
+        case "copy":      if let t = body["text"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }
+        case "edit":      if let url { AppDelegate.shared.edit(url) }
+        case "title":     if let url { let t = (body["title"] as? String ?? "").trimmingCharacters(in: .whitespaces); window.title = t.isEmpty ? url.lastPathComponent : t }
+        case "open":      if let p = body["path"] as? String { AppDelegate.shared.open(URL(fileURLWithPath: p)) }
+        case "openPanel": AppDelegate.shared.showOpenPanel()
+        case "rendered":  lastRenderMs = body["ms"] as? Int ?? -1
+        case "error":     if SchemeHandler.debug || snapshotPath != nil { fputs("page error: \(body["message"] as? String ?? "?")\n", stderr) }
         default: break
         }
+    }
+
+    private func openWikilink(_ target: String, anchor: String) {
+        guard let url, let u = Roots.resolveWikilink(target, from: url) else { NSSound.beep(); return }
+        if mdExtensions.contains(u.pathExtension.lowercased()) { AppDelegate.shared.open(u, anchor: anchor.isEmpty ? nil : anchor) }
+        else { AppDelegate.shared.handle(link: u) }
     }
 
     // MARK: WKNavigationDelegate / WKUIDelegate
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let target = action.request.url else { decisionHandler(.cancel); return }
-        if target.isFileURL, let tmp = tempFile, target.path == tmp.path { decisionHandler(.allow); return }
+        if action.navigationType == .other, target.absoluteString == pageURL.absoluteString { decisionHandler(.allow); return }
         decisionHandler(.cancel)
-        AppDelegate.shared.handle(link: target)
+        AppDelegate.shared.handle(link: Document.fileLink(from: target))
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let u = action.request.url { AppDelegate.shared.handle(link: u) }
+        if let u = action.request.url { AppDelegate.shared.handle(link: Document.fileLink(from: u)) }
         return nil
+    }
+
+    /// Links inside the page resolve against the mdview:// base; map them back to file URLs (keeping the fragment).
+    static func fileLink(from url: URL) -> URL {
+        guard url.scheme == schemeName, (url.host ?? "").isEmpty else { return url }
+        var c = URLComponents(); c.scheme = "file"; c.path = url.path; c.fragment = url.fragment
+        return c.url ?? url
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageLoaded = true
         if let a = pendingAnchor { pendingAnchor = nil; scrollTo(anchor: a) }
-        if let md = readMarkdown(), md != lastContent { lastContent = md; refresh(force: true) }
+        if url != nil, let md = readMarkdown(), md != lastContent { lastContent = md; refresh(force: true) }
         if let path = snapshotPath {
-            let delay = Double(ProcessInfo.processInfo.environment["MDVIEW_SNAPSHOT_DELAY"] ?? "") ?? 0.8
+            let delay = Double(ProcessInfo.processInfo.environment["MDVIEW_SNAPSHOT_DELAY"] ?? "") ?? 1.0
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
-                if path.lowercased().hasSuffix(".pdf") {
-                    self.writePDF(to: URL(fileURLWithPath: path)) { ok in print(ok ? "pdf written: \(path)" : "pdf failed"); exit(ok ? 0 : 1) }
-                    return
-                }
-                self.webView.takeSnapshot(with: nil) { image, error in
+                print("rendered in \(self.lastRenderMs) ms")
+                let finish: (Bool, String) -> Void = { ok, what in print(ok ? "\(what) written: \(path)" : "\(what) failed"); exit(ok ? 0 : 1) }
+                let out = URL(fileURLWithPath: path)
+                if path.lowercased().hasSuffix(".pdf") { self.writePDF(to: out) { finish($0, "pdf") }; return }
+                if path.lowercased().hasSuffix(".html") { self.writeHTML(to: out) { finish($0, "html") }; return }
+                self.webView.takeSnapshot(with: nil) { image, _ in
                     if let image, let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
                        let png = rep.representation(using: .png, properties: [:]) {
-                        try? png.write(to: URL(fileURLWithPath: path)); print("snapshot written: \(path)")
-                    } else { print("snapshot failed: \(error?.localizedDescription ?? "?")") }
-                    exit(0)
+                        finish((try? png.write(to: out)) != nil, "snapshot")
+                    } else { finish(false, "snapshot") }
                 }
             }
         }
@@ -361,7 +339,7 @@ final class Document: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDele
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "mdv")
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
-        if let t = tempFile { try? FileManager.default.removeItem(at: t) }
+        if let root { Roots.release(root) }
         AppDelegate.shared.documentClosed(self)
     }
 }
@@ -378,34 +356,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Lifecycle
 
-    func applicationWillFinishLaunching(_ n: Notification) {
-        try? FileManager.default.removeItem(at: Document.tempDirectory)
-        buildMenu()
-    }
+    func applicationWillFinishLaunching(_ n: Notification) { buildMenu() }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         var args = Array(CommandLine.arguments.dropFirst())
         var snapshot: String?
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count { snapshot = args[i + 1]; args.removeSubrange(i...i + 1) }
         for a in args where !a.hasPrefix("-") { open(URL(fileURLWithPath: a)) }
+        if let snapshot {
+            if documents.isEmpty { newStartWindow() }
+            guard let d = documents.last else { return }
+            d.snapshotPath = snapshot
+            d.window.setFrame(NSRect(x: 40, y: 40, width: 1000, height: 2300), display: true)
+        }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, e.charactersIgnoringModifiers == "=" {
                 self?.zoomIn(nil); return nil
             }
             return e
         }
-        if let snapshot, let d = documents.last {
-            d.snapshotPath = snapshot
-            d.window.setFrame(NSRect(x: 40, y: 40, width: 1000, height: 2300), display: true)
-        }
     }
 
     func application(_ sender: NSApplication, open urls: [URL]) { urls.forEach { open($0) } }
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool { documents.isEmpty }
-    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool { showOpenPanel(); return true }
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool { newStartWindow(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     // MARK: Documents
+
+    func recentEntries() -> [[String: String]] {
+        NSDocumentController.shared.recentDocumentURLs.prefix(12).map {
+            ["name": $0.lastPathComponent, "dir": ($0.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath, "path": $0.path]
+        }
+    }
+
+    @objc func newWindow(_ sender: Any?) { newStartWindow() }
+
+    func newStartWindow() {
+        let d = Document(url: nil)
+        documents.append(d)
+        place(d.window)
+        d.window.makeKeyAndOrderFront(nil)
+        activate()
+    }
 
     func open(_ rawURL: URL, anchor: String? = nil) {
         let url = rawURL.standardizedFileURL.resolvingSymlinksInPath()
@@ -417,12 +410,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             activate(); return
         }
         let d = Document(url: url, anchor: anchor)
-        documents.append(d)
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
-        if documents.count > 1 { cascadePoint = d.window.cascadeTopLeft(from: cascadePoint) }
-        else { cascadePoint = d.window.cascadeTopLeft(from: .zero) }
-        d.window.makeKeyAndOrderFront(nil)
+        let startDoc = documents.first { $0.isStart && $0.window.isKeyWindow } ?? documents.first { $0.isStart }
+        if let startDoc {
+            d.window.setFrame(startDoc.window.frame, display: false)
+            documents.append(d)
+            d.window.makeKeyAndOrderFront(nil)
+            startDoc.window.close()
+        } else {
+            documents.append(d)
+            place(d.window)
+            d.window.makeKeyAndOrderFront(nil)
+        }
         activate()
+    }
+
+    private func place(_ window: NSWindow) {
+        cascadePoint = window.cascadeTopLeft(from: documents.count > 1 ? cascadePoint : .zero)
     }
 
     func documentClosed(_ d: Document) { documents.removeAll { $0 === d } }
@@ -510,7 +514,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         p.message = "Choose a Markdown file to view"
         activate()
         if p.runModal() == .OK { p.urls.forEach { open($0) } }
-        else if documents.isEmpty { NSApp.terminate(nil) }
     }
 
     // MARK: Menu
@@ -559,6 +562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appItem = NSMenuItem(); appItem.submenu = appMenu; main.addItem(appItem)
 
         let file = NSMenu(title: "File")
+        file.addItem(item("New Window", #selector(newWindow(_:)), "n"))
         file.addItem(item("Open…", #selector(openDocument(_:)), "o"))
         let recent = NSMenu(title: "Open Recent"); recent.delegate = self; recentMenu = recent
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: ""); recentItem.submenu = recent
@@ -572,7 +576,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         file.addItem(item("Reveal in Finder", #selector(Document.revealInFinder(_:)), "r", [.command, .option]))
         file.addItem(item("Copy Path", #selector(Document.copyPath(_:)), "c", [.command, .option]))
         file.addItem(.separator())
-        file.addItem(item("Export as PDF…", #selector(Document.exportPDF(_:)), "e", [.command, .shift]))
+        file.addItem(item("Export as HTML…", #selector(Document.exportHTML(_:)), "e", [.command, .shift]))
+        file.addItem(item("Export as PDF…", #selector(Document.exportPDF(_:)), "p", [.command, .shift]))
         file.addItem(item("Print…", #selector(Document.printDocument(_:)), "p"))
         let fileItem = NSMenuItem(); fileItem.submenu = file; main.addItem(fileItem)
 
@@ -640,11 +645,22 @@ func setAsDefaultHandler(completion: @escaping (String) -> Void) {
 
 // MARK: - Entry point
 
-if CommandLine.arguments.contains("--set-default") {
+let cli = CommandLine.arguments
+if cli.contains("--help") || cli.contains("-h") {
+    print("""
+    MDView — a lightweight Markdown viewer
+    usage: MDView [file.md ...]
+           MDView --set-default          make MDView the default app for Markdown files
+           MDView --which                print the current default app for Markdown
+           MDView --snapshot OUT file.md render file.md to OUT (.png, .pdf or .html) and exit
+    """)
+    exit(0)
+}
+if cli.contains("--set-default") {
     setAsDefaultHandler { s in print(s); exit(s.contains("Failed") ? 1 : 0) }
     RunLoop.main.run()
 }
-if CommandLine.arguments.contains("--which") {
+if cli.contains("--which") {
     print(NSWorkspace.shared.urlForApplication(toOpen: markdownType)?.path ?? "none"); exit(0)
 }
 
